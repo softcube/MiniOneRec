@@ -5,7 +5,7 @@ torcheval==0.0.7
 torchmetrics==1.0.3
 torchrec==0.6.0+cu118
 torchsnapshot==0.1.0
-torchvision==0.21.0
+# torchvision==0.21.0
 aiofiles==24.1.0
 aiohappyeyeballs==2.3.5
 aiohttp==3.10.3
