@@ -11,7 +11,7 @@ class ResidualVectorQuantizer(nn.Module):
     """
 
     def __init__(self, n_e_list, e_dim, sk_epsilons, beta = 0.25,
-                 kmeans_init = False, kmeans_iters = 100, sk_iters=100,):
+            kmeans_init = False, kmeans_iters = 100, sk_iters=100,):
         super().__init__()
         self.n_e_list = n_e_list
         self.e_dim = e_dim
@@ -21,13 +21,20 @@ class ResidualVectorQuantizer(nn.Module):
         self.kmeans_iters = kmeans_iters
         self.sk_epsilons = sk_epsilons
         self.sk_iters = sk_iters
-        self.vq_layers = nn.ModuleList([VectorQuantizer(n_e, e_dim,
-                                                        beta=self.beta,
-                                                        kmeans_init = self.kmeans_init,
-                                                        kmeans_iters = self.kmeans_iters,
-                                                        sk_epsilon=sk_epsilon,
-                                                        sk_iters=sk_iters)
-                                        for n_e, sk_epsilon in zip(n_e_list,sk_epsilons) ])
+        self.vq_layers = nn.ModuleList(
+            [
+                VectorQuantizer(
+                    n_e,
+                    e_dim,
+                    beta=self.beta,
+                    kmeans_init=self.kmeans_init,
+                    kmeans_iters=self.kmeans_iters,
+                    sk_epsilon=sk_epsilon,
+                    sk_iters=sk_iters
+                )
+                for n_e, sk_epsilon in zip(n_e_list, sk_epsilons)
+            ]
+        )
 
     def get_codebook(self):
         all_codebook = []
