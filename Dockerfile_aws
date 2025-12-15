@@ -3,6 +3,7 @@
 ARG UBUNTU_VERSION=20.04
 ARG CUDA_VERSION=12.0.0
 ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn8-devel-ubuntu${UBUNTU_VERSION}
+ARG PYTHON_VERSION=3.9
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
@@ -21,12 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-      python3.9 \
-      python3.9-dev \
-      python3.9-distutils \
-    && ln -sf /usr/bin/python3.9 /usr/bin/python3 \
+      python${PYTHON_VERSION} \
+      python${PYTHON_VERSION}-dev \
+      python${PYTHON_VERSION}-distutils \
+    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.9 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && ln -sf /usr/local/bin/pip /usr/bin/pip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -48,4 +49,11 @@ RUN python -m pip install --upgrade pip && \
         transformers==4.57.1 ; \
     fi
 
-WORKDIR /workspace
+WORKDIR /root
+
+# Copy project files into the image (same flow as `RQ-VAE-Recommender`).
+COPY . ./minionerec/
+
+WORKDIR /root/minionerec/
+
+ENTRYPOINT ["tail", "-f", "/dev/null"]
