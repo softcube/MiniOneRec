@@ -11,9 +11,9 @@ CONTAINER_OUTPUT_DIR="/root/minionerec/output"
 CONTAINER_NAME="minionerec"
 GPU_OPTION="${GPU_OPTION:-}"
 
-# Defaults mirror the README example (you can override via env vars).
-DATA_PATH="${DATA_PATH:-./data/Amazon18/Industrial_and_Scientific/Industrial_and_Scientific.emb-qwen-td.npy}"
-CKPT_DIR="${CKPT_DIR:-./output/Industrial_and_Scientific}"
+# Defaults for Merlin embeddings (you can override via env vars).
+DATA_PATH="${DATA_PATH:-./data/merlin/embeddings_matrix.npy}"
+CKPT_DIR="${CKPT_DIR:-./output/merlin}"
 LR="${LR:-1e-3}"
 EPOCHS="${EPOCHS:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-20480}"
