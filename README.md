@@ -161,27 +161,34 @@ pip install -r requirements.txt
   Get it from the official page:
   [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/), 
   [Amazon Reviews 2018](https://cseweb.ucsd.edu/~jmcauley/datasets/amazon_v2/), 
-  [Amazon Reviews 2014](https://cseweb.ucsd.edu/~jmcauley/datasets/amazon/links.html).
+  [Amazon Reviews 2014](https://cseweb.ucsd.edu/~jmcauley/datasets/amazon/links.html).  
+  Alternatively, use
+  `python data/download_amazon_reviews.py --dataset-version 2018 --categories Industrial_and_Scientific --data-types reviews metadata --size full --timeout 3600 --retries 5 --output-dir data/raw`
+  to download the exact dumps we use from the official mirrors (see `python data/download_amazon_reviews.py --help` for more options).
   Note: The Industrial and Office datasets are included in Amazon 2018; the Amazon 2014 and 2023 versions require slight modifications to our data/amazon18_data_process.py.
 - **2.2 Filter and preprocess**
 ```
 bash data/amazon18_data_process.sh \
-     --dataset  your_dataset_type \ # e.g. Industrial
+     --dataset Industrial_and_Scientific \
      --user_k 5 \
      --item_k 5 \
      --st_year 2017 \
      --st_month 10 \
      --ed_year 2018 \
      --ed_month 11 \
+     --metadata_file data/raw/2018/Industrial_and_Scientific/meta_Industrial_and_Scientific.json \
+     --reviews_file data/raw/2018/Industrial_and_Scientific/Industrial_and_Scientific.json \
      --output_path ./data/Amazon18
 ```
 - **2.3 Encode item text to embeddings**
 ```
-bash rq/amazon_text2emb.sh \
-     --dataset your_dataset_type \ # e.g., Industrial 
-     --root your_processed_dataset_path \
+PLM_CHECKPOINT=/path/to/qwen/checkpoint \
+BATCH_SIZE=64 \
+bash rq/text2emb/amazon_text2emb.sh \
+     --dataset Industrial_and_Scientific \
+     --root ./data/Amazon18/Industrial_and_Scientific \
      --plm_name qwen \
-     --plm_checkpoint your_emb_model_path
+     --plm_checkpoint ./checkpoints/qwen1.5
 ```
 
 ### 3. SID Construction
@@ -191,12 +198,13 @@ Choose either 3.1.1, 3.1.2, 3.1.3 or 3.1.4.
 - **3.1.1 Train RQ-VAE on the embeddings**
 ```
 bash rq/rqvae.sh \
-      --data_path xxx/data/Industrial_and_Scientific/Industrial_and_Scientific.emb-qwen-td.npy \
+      --data_path ./data/Amazon18/Industrial_and_Scientific/Industrial_and_Scientific.emb-qwen-td.npy \
       --ckpt_dir ./output/Industrial_and_Scientific \
       --lr 1e-3 \
       --epochs 10000 \
       --batch_size 20480
 ```
+(The script automatically selects `cuda`, `mps`, or `cpu` based on availability; pass `--device` explicitly to override.)
 
 - **3.1.2 Train RQ-Kmeans on the embeddings**
 
@@ -260,6 +268,25 @@ bash rl.sh \
 ```
 bash evaluate.sh \
      --exp_name your_model_path 
+```
+
+### Docker Helpers
+
+Use the provided helper scripts to run `rq/rqvae.sh` inside Docker. By default
+`run_container_aws.sh` rebuilds the image by invoking `build_image_aws.sh`
+(set `SKIP_BUILD=1` to skip rebuilding). Pass `container-only` as the first
+argument if you want the container to stay running without immediately launching
+training.
+
+```bash
+# rebuild image and launch the containerised trainer
+bash run_container_aws.sh --epochs 5000
+
+# skip the build step when the image already exists locally
+SKIP_BUILD=1 bash run_container_aws.sh --device cuda:0
+
+# only start the container, run commands manually later
+bash run_container_aws.sh container-only
 ```
 
 ---
