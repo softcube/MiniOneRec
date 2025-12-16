@@ -162,3 +162,8 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 .idea/
+*.inter
+*.user2id
+*.item2id
+*.npy
+*.json

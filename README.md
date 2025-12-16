@@ -180,6 +180,17 @@ bash data/amazon18_data_process.sh \
      --reviews_file data/raw/2018/Industrial_and_Scientific/Industrial_and_Scientific.json \
      --output_path ./data/Amazon18
 ```
+- **2.2 (Merlin) Convert prepared parquet splits**
+If you already have `train/valid/test.parquet` prepared under `data/raw/merlin/`, convert them to the same Amazon18-style RQ-ready format:
+```
+bash data/merlin.sh \
+     --train_file data/raw/merlin/train.parquet \
+     --valid_file data/raw/merlin/valid.parquet \
+     --test_file data/raw/merlin/test.parquet \
+     --output_path ./data/merlin \
+     --dataset merlin
+```
+This writes `merlin.{train,valid,test}.inter`, plus `merlin.user2id` / `merlin.item2id`, under `./data/merlin/merlin/`. Since Merlin has no item metadata here, we also emit a minimal `merlin.item.json` where `title` is the original `item_id`.
 - **2.3 Encode item text to embeddings**
 ```
 PLM_CHECKPOINT=/path/to/qwen/checkpoint \
@@ -190,6 +201,15 @@ bash rq/text2emb/amazon_text2emb.sh \
      --plm_name qwen \
      --plm_checkpoint ./checkpoints/qwen1.5
 ```
+- **2.3 (Merlin) Remap a prepared embedding matrix**
+If you already have an embedding matrix where each row index corresponds to the original Merlin `item_id` indices used inside `item_id_list_seq`, remap it to match the `merlin.item2id` mapping and save it as `merlin_emb.npy`:
+```
+bash rq/text2emb/merlin_text2emb.sh \
+     --embedding_input_source /path/to/embedding_input_source.npy \
+     --root ./data/merlin/merlin \
+     --dataset merlin
+```
+This writes `./data/merlin/merlin/merlin_emb.npy`, where row `new_item_id` contains the embedding from `embedding_input_source[original_item_id]`.
 
 ### 3. SID Construction
 
@@ -205,6 +225,15 @@ bash rq/rqvae.sh \
       --batch_size 20480
 ```
 (The script automatically selects `cuda`, `mps`, or `cpu` based on availability; pass `--device` explicitly to override.)
+For Merlin (if you already prepared `./data/merlin/merlin/merlin_emb.npy` via `rq/text2emb/merlin_text2emb.sh`):
+```
+bash rq/rqvae.sh \
+      --data_path ./data/merlin/merlin/merlin_emb.npy \
+      --ckpt_dir ./output/merlin \
+      --lr 1e-3 \
+      --epochs 10000 \
+      --batch_size 20480
+```
 
 - **3.1.2 Train RQ-Kmeans on the embeddings**
 
@@ -231,9 +260,16 @@ bash rqkmeans_plus.sh
 
 - **3.2 Generate indices(only RQ-VAE & RQ-Kmeans+ needed)**
 ```
-python rq/generate_indices.py
+python rq/generate_indices.py --ckpt_path /path/to/best_collision_model.pth
 # or
 bash rq/generate_indices_plus.sh
+```
+For Merlin:
+```
+python rq/generate_indices.py \
+     --ckpt_path /path/to/your_rqvae_ckpt.pth \
+     --dataset merlin \
+     --root ./data/merlin/merlin
 ```
 
 - **3.3 Convert dataset format**
@@ -244,6 +280,14 @@ python convert_dataset.py \
      --output_dir /path/to/ourput_dir \
 
 ```
+For Merlin:
+```
+python convert_dataset.py \
+     --dataset_name merlin \
+     --data_dir ./data/merlin/merlin \
+     --output_dir ./data/merlin/minionerec \
+     --category merlin
+```
 
 ### 4. SFT
 
@@ -253,6 +297,20 @@ bash sft.sh \
      --output_dir your_ourput_dir \
      --sid_index_path your_.index.json_path \
      --item_meta_path your_.item.json_path
+```
+For Merlin (SID-only; item metadata is optional):
+```
+TRAIN_FILE=./data/merlin/minionerec/train/merlin_5_2016-10-2018-11.csv
+EVAL_FILE=./data/merlin/minionerec/valid/merlin_5_2016-10-2018-11.csv
+
+torchrun --nproc_per_node 1 \
+    sft.py \
+    --base_model your_model_path \
+    --train_file ${TRAIN_FILE} \
+    --eval_file ${EVAL_FILE} \
+    --output_dir your_output_dir \
+    --category merlin \
+    --sid_index_path ./data/merlin/merlin/merlin.index.json
 ```
 
 ### 5. Recommendation-Oriented RL

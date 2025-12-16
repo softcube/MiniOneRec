@@ -1,42 +1,28 @@
+import json
+import math
 import os
-import sys
-from typing import List
-import numpy as np 
+import random
+from functools import partial
+
 import fire
+import numpy as np
 import torch
 import transformers
-from datasets import load_dataset, concatenate_datasets
-from transformers import EarlyStoppingCallback, AutoConfig
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
-from dataclasses import dataclass
-import torch.nn as nn
-import math
-import warnings
-from functools import partial
-import numpy as np 
-import fire
-import transformers
 from torch.optim.lr_scheduler import LambdaLR
-import json
-import torch.nn as nn
-import bitsandbytes as bnb
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from data import D3Dataset, SFTData, SidSFTDataset, SidItemFeatDataset, FusionSeqRecDataset, PreferenceSFTDataset, UserPreference2sidSFTDataset, TitleHistory2SidSFTDataset
-import random
-from datasets import Dataset as HFDataset
 from torch.utils.data import ConcatDataset
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
+
+from data import FusionSeqRecDataset, SidItemFeatDataset, SidSFTDataset
 
 
 class TokenExtender:
-    def __init__(self, data_path, dataset, index_file=".index.json"):
-        self.data_path = data_path
-        self.dataset = dataset
-        self.index_file = index_file
+    def __init__(self, index_path: str):
+        self.index_path = index_path
         self.indices = None
         self.new_tokens = None
         
     def _load_data(self):
-        with open(os.path.join(self.data_path, self.dataset + self.index_file), 'r') as f:
+        with open(self.index_path, "r") as f:
             self.indices = json.load(f)
     
     def get_new_tokens(self):
@@ -46,11 +32,11 @@ class TokenExtender:
         if self.indices is None:
             self._load_data()
         
-        self.new_tokens = set()
-        for index in self.indices.values():
-            for token in index:
-                self.new_tokens.add(token)
-        self.new_tokens = sorted(list(self.new_tokens))
+        new_tokens = set()
+        for token_list in self.indices.values():
+            for token in token_list:
+                new_tokens.add(token)
+        self.new_tokens = sorted(new_tokens)
         
         return self.new_tokens
 
@@ -116,25 +102,44 @@ def train(
 ):
     set_seed(seed)
     os.environ['WANDB_PROJECT'] = wandb_project
-    category_dict = {"Industrial_and_Scientific": "industrial and scientific items", "Office_Products": "office products", "Toys_and_Games": "toys and games", "Sports": "sports and outdoors", "Books": "books"}
+    category_dict = {
+        "Industrial_and_Scientific": "industrial and scientific items",
+        "Office_Products": "office products",
+        "Toys_and_Games": "toys and games",
+        "Sports": "sports and outdoors",
+        "Books": "books",
+        "merlin": "items",
+    }
     print(category)
     category = category_dict[category]
     assert (
         base_model
     ), "Please specify a --base_model, e.g. --base_model='decapoda-research/llama-7b-hf'"
-    gradient_accumulation_steps = batch_size // micro_batch_size
+    if micro_batch_size <= 0:
+        raise ValueError("--micro_batch_size must be > 0")
+    gradient_accumulation_steps = max(1, math.ceil(batch_size / micro_batch_size))
     
-    device_map = "auto"
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     ddp = world_size != 1
     if ddp:
-        device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
+        gradient_accumulation_steps = max(1, gradient_accumulation_steps)
+
+    if torch.cuda.is_available():
+        is_bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        use_bf16 = bool(is_bf16_supported)
+        use_fp16 = not use_bf16
+        torch_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    else:
+        use_bf16 = False
+        use_fp16 = False
+        torch_dtype = torch.float32
 
     if not train_from_scratch:
         model = AutoModelForCausalLM.from_pretrained(
             base_model,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
         )
     else:
         config = AutoConfig.from_pretrained(base_model)
@@ -145,18 +150,20 @@ def train(
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
+
+    original_vocab_size = len(tokenizer)
+    new_tokens = []
     
     if sid_index_path and os.path.exists(sid_index_path):
         print(f"Loading index from {sid_index_path}")
-        token_extender = TokenExtender(
-            data_path=os.path.dirname(sid_index_path),
-            dataset=os.path.basename(sid_index_path).split('.')[0]
-        )
+        token_extender = TokenExtender(index_path=sid_index_path)
         new_tokens = token_extender.get_new_tokens()
         if new_tokens:
             print(f"Adding {len(new_tokens)} new tokens to tokenizer")
             tokenizer.add_tokens(new_tokens)
             model.resize_token_embeddings(len(tokenizer))
+    elif sid_index_path:
+        print(f"Warning: sid_index_path={sid_index_path} does not exist; semantic tokens will not be added.")
 
     # Freeze LLM parameters if required
     if freeze_LLM:
@@ -164,23 +171,27 @@ def train(
         for param in model.parameters():
             param.requires_grad = False
 
-        if sid_index_path and os.path.exists(sid_index_path) and new_tokens:
+        if new_tokens:
             embedding_layer = model.get_input_embeddings()
-            if embedding_layer.weight.shape[0] > original_vocab_size:
-                embedding_layer.weight.requires_grad = True
+            embedding_layer.weight.requires_grad = True
 
-                def mask_grad(grad):
-                    # grad shape: [vocab_size, hidden_dim]
-                    grad[:original_vocab_size].zero_()
-                    return grad
-                
-                embedding_layer.weight.register_hook(mask_grad)
+            def mask_grad(grad):
+                # grad shape: [vocab_size, hidden_dim]
+                grad[:original_vocab_size].zero_()
+                return grad
+            
+            embedding_layer.weight.register_hook(mask_grad)
 
-                print(f"Unfrozen {len(new_tokens)} new token embeddings "
-                    f"(indices {original_vocab_size} to {len(tokenizer)-1})")
+            print(
+                f"Unfrozen {len(new_tokens)} new token embeddings "
+                f"(indices {original_vocab_size} to {len(tokenizer) - 1})"
+            )
 
         else:
-            print("Warning: freeze_LLM=True but no new tokens added. All parameters are frozen!")
+            raise RuntimeError(
+                "freeze_LLM=True but no new tokens were added. "
+                "Provide a valid --sid_index_path (or add tokens manually), otherwise nothing is trainable."
+            )
 
         # Print the number of trainable parameters (it will still report the size of the entire embedding matrix, but only the newly added rows will have non-zero gradients).
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -189,18 +200,49 @@ def train(
             f"{total_params:,} ({100*trainable_params/total_params:.2f}%)")
         
     train_datasets = []
-    # train_data1 = SFTData(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    train_data1 = SidSFTDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    train_datasets.append(train_data1)
-    train_data2 = SidItemFeatDataset(item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    train_datasets.append(train_data2)
-    train_data3 = FusionSeqRecDataset(train_file=train_file, item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category)
-    train_datasets.append(train_data3)
-    # train_data4 = SFTData(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    # train_datasets.append(train_data4)
-    # train_data5 = TitleHistory2SidSFTDataset(train_file=train_file, item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category)
-    # train_datasets.append(train_data5)
-    train_data = ConcatDataset(train_datasets)
+    train_datasets.append(
+        SidSFTDataset(
+            train_file=train_file,
+            tokenizer=tokenizer,
+            max_len=cutoff_len,
+            sample=sample,
+            seed=seed,
+            category=category,
+        )
+    )
+
+    # Optional auxiliary tasks (require item metadata + index mapping)
+    if item_meta_path and os.path.exists(item_meta_path) and sid_index_path and os.path.exists(sid_index_path):
+        train_datasets.append(
+            SidItemFeatDataset(
+                item_file=item_meta_path,
+                index_file=sid_index_path,
+                tokenizer=tokenizer,
+                max_len=cutoff_len,
+                sample=sample,
+                seed=seed,
+                category=category,
+            )
+        )
+        train_datasets.append(
+            FusionSeqRecDataset(
+                train_file=train_file,
+                item_file=item_meta_path,
+                index_file=sid_index_path,
+                tokenizer=tokenizer,
+                max_len=cutoff_len,
+                sample=sample,
+                seed=seed,
+                category=category,
+            )
+        )
+    else:
+        if not (item_meta_path and os.path.exists(item_meta_path)):
+            print("Info: item_meta_path missing; skipping title/description auxiliary tasks.")
+        if not (sid_index_path and os.path.exists(sid_index_path)):
+            print("Info: sid_index_path missing; skipping auxiliary tasks that need index.json.")
+
+    train_data = train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
     val_data = SidSFTDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
     # val_data = SFTData(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=20000, seed=seed, category=category)
     print("LOAD DATA FINISHED")    
@@ -210,24 +252,21 @@ def train(
             resume_from_checkpoint, "pytorch_model.bin"
         )  # Full checkpoint
 
-    if not ddp and torch.cuda.device_count() > 1:
-        model.is_parallelizable = True
-        model.model_parallel = True
-    
-    sample_frac = 1
-    hf_train_dataset = HFDataset.from_dict({k: [v[k] for v in train_data] for k in train_data[0].keys()})
-    hf_train_dataset = hf_train_dataset.shuffle(seed=42).select(range(int(sample_frac * len(hf_train_dataset))))
-    hf_val_dataset = HFDataset.from_dict({k: [v[k] for v in val_data] for k in val_data[0].keys()}).shuffle(seed=seed)
-    hf_val_dataset = hf_val_dataset.shuffle(seed=42)
+    # Avoid materializing the entire dataset into a HuggingFace Dataset (can be very slow and memory heavy).
+    # Let Trainer work with torch Dataset/ConcatDataset directly.
+    steps_per_epoch = max(
+        1,
+        math.ceil(len(train_data) / (micro_batch_size * world_size * gradient_accumulation_steps)),
+    )
+    eval_step_ratio = 0.05
+    eval_steps = max(1, int(eval_step_ratio * steps_per_epoch))
+    print(f"steps_per_epoch={steps_per_epoch} eval_steps={eval_steps} world_size={world_size}")
 
-    print(hf_train_dataset)
-    print(hf_val_dataset)
-    eval_step = 0.05
     trainer = transformers.Trainer(
         # deepspeed=deepspeed,
         model=model,
-        train_dataset=hf_train_dataset,
-        eval_dataset=hf_val_dataset,
+        train_dataset=train_data,
+        eval_dataset=val_data,
         args=transformers.TrainingArguments(
             # deepspeed=deepspeed,
             run_name=wandb_run_name,
@@ -237,13 +276,14 @@ def train(
             warmup_steps=20,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
-            bf16=True,
+            bf16=use_bf16,
+            fp16=use_fp16,
             logging_steps=1,
             optim="adamw_torch",
             eval_strategy="steps",
-            eval_steps=eval_step, 
+            eval_steps=eval_steps,
             save_strategy="steps",
-            save_steps=eval_step,
+            save_steps=eval_steps,
             output_dir=output_dir,
             save_total_limit=1,
             load_best_model_at_end=True,
